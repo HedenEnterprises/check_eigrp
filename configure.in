@@ -1,0 +1,57 @@
+dnl Process this file with autoconf to produce a configure script.
+
+AC_PREREQ([2.63])
+AC_INIT(check_eigrp, 0.93, igortiunov@gmail.com)
+AC_CONFIG_SRCDIR([src/check_eigrp.c])
+AM_INIT_AUTOMAKE
+
+dnl Checks for programs.
+AC_PROG_CC
+AM_PROG_CC_C_O
+AC_PROG_MAKE_SET
+
+dnl Find some directory location
+for i in /usr/include /usr/local/include; do
+    test -f $i/net-snmp/net-snmp-config.h   && SNMP_INCDIR=$i
+    test -f $i/snmp/include/net-snmp/net-snmp-config.h && SNMP_INCDIR=$i/snmp/include
+done
+
+for i in /usr /usr/snmp /usr/local /usr/local/snmp; do
+    test -f $i/lib/libnetsnmp.a -o -f $i/lib/libnetsnmp.so && SNMP_LIBDIR=$i/lib
+    test -f $i/lib64/libnetsnmp.a -o -f $i/lib64/libnetsnmp.so && SNMP_LIBDIR=$i/lib
+done
+
+AC_CHECK_HEADERS($SNMP_INCDIR/net-snmp/net-snmp-config.h,,
+    AC_MSG_RESULT(Cannot find Net-SNMP header files...please install net-snmp-devel package))
+
+if test -z $SNMP_INCDIR
+then
+    echo "Error: Cannot find Net-SNMP header files...please install net-snmp-devel package"
+    exit 2
+fi
+
+LDFLAGS="-L$SNMP_LIBDIR"
+CFLAGS="-O2 -I $SNMP_INCDIR -lnetsnmp"
+
+dnl Checks for libraries.
+AC_CHECK_LIB(netsnmp, snmp_open, SNMP_LIBCHECK=OK,
+    AC_MSG_RESULT(Cannot find Net-SNMP libraries...please install net-snmp-libs package))
+
+if test -z $SNMP_LIBCHECK
+then
+    echo "Error: Cannot find Net-SNMP library...please install net-snmp-libs package"
+    exit 2
+fi
+
+dnl Checks for header files.
+AC_CHECK_HEADERS(unistd.h signal.h)
+
+dnl Checks for typedefs, structures, and compiler characteristics.
+AC_TYPE_SIZE_T
+
+dnl Checks for library functions.
+AC_TYPE_SIGNAL
+AC_CHECK_FUNCS([alarm dup2 memset])
+
+AC_CONFIG_FILES([Makefile src/Makefile])
+AC_OUTPUT
