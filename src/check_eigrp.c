@@ -6,10 +6,9 @@
 #include <signal.h>
 
 
-#define VERSION "0.1.0"
+#define CHECK_EIGRP_VERSION "0.1.0"
 
 
-/* SNMP oids */
 #define OID_EIGRP_NEIGHBOR_COUNT       "1.3.6.1.4.1.9.9.449.1.2.1.1.2.0."
 #define OID_EIGRP_PEER_ADDRESS         "1.3.6.1.4.1.9.9.449.1.4.1.1.3.0."
 #define OID_PROBE_SOFTWARE_REVISION    "1.3.6.1.2.1.16.19.2.0"
@@ -17,70 +16,30 @@
 #define OID_EIGRP_PEER_INTERFACE_INDEX "1.3.6.1.4.1.9.9.449.1.4.1.1.4."
 
 
-/* snmp macros */
-#define _GET(oid) snmpget(session, oid, buffer, sizeof(buffer))
-
-
-/* Nagios plugin exit status */
-enum EXITCODE { 
+enum EXIT_CODE {
     OK,
     WARNING,
     CRITICAL,
     UNKNOWN
-} exitcode;
+} exit_code;
 
 
-/* Structure for command-line arguments */
-struct globalArgs_t {
-    const char  * HOSTNAME;       /* Hostname of monitoring router */
-    char        * COMMUNITY;      /* SNMP Community */
-    const char  * NEIGHBORS;      /* Neighbors count */
-    const char  * AS;             /* AS number of monitoring router */
-    int           Verbose;        /* Get or not list of neighbors (disabled by default) */
-    int           timeOut;        /* Set timeout for plugin, default is 3 seconds */
-    int           snmpVersion;    /* which version of snmp 1,2,3 */
-    const char  * v3Context;      /* v3 snmp context */
-    int           v3secLevel;     /* v3 security level, one of SECLEVEL_* definitions */
-    int           v3authProto;    /* v3 authentication protocol, one of AUTHPROTO_* definitions */
-    int           v3privProto;    /* v3 privacy protocol, one of PRIVPROTO_* definitions */
-    const char  * v3secName;      /* v3 username */
-    const char  * v3authPassword; /* v3 authentication password */
-    const char  * v3privPassword; /* v3 privacy password */
-} globalArgs;
+void version();
+void usage(char * error);
+void stderr_to_stdout();
+void snmpget(void * session_ptr, char * oid_value, char * buffer, size_t buffer_size);
+void print_interface_description(void * session, char * asnumber, int count, int mutex);
+void alarm_handler(int a);
+void set_timeout_alarm(int timeout, int neighbors);
+void parse_arguments(int argc, char * argv[], struct snmp_session * session, int * verbosity, int * timeout, char * asnumber, char * neighbors);
+int main(int argc, char * argv[]);
 
 
-const char * optString = "H:C:n:s:t:vhVp:c:L:a:x:U:A:X:";
-int longIndex = 0;
-
-
-const struct option longOpts[] = {
-    { "hostname",   required_argument, NULL, 'H' },
-    { "community",  required_argument, NULL, 'C' },
-    { "neighbors",  required_argument, NULL, 'n' },
-    { "asnumber",   required_argument, NULL, 's' },
-    { "timeout",    required_argument, NULL, 't' },
-    { "verbose",    no_argument,       NULL, 'v' },
-    { "help",       no_argument,       NULL, 'h' },
-    { "version",    no_argument,       NULL, 'V' },
-    { "protocol",   required_argument, NULL, 'p' },
-    { "context",    required_argument, NULL, 'c' },
-    { "seclevel",   required_argument, NULL, 'L' },
-    { "authproto",  required_argument, NULL, 'a' },
-    { "privproto",  required_argument, NULL, 'x' },
-    { "secname",    required_argument, NULL, 'U' },
-    { "authpasswd", required_argument, NULL, 'A' },
-    { "privpasswd", required_argument, NULL, 'X' },
-    { NULL,         no_argument,       NULL,  0  }
-};
-
-
-/*Usage function, for printing help*/
 void usage(char * error)
 {
     if (error != NULL) {
         printf("%s\n", error);
     }
-    version();
     printf("%s\n", "");
     printf("%s\n", "Check status of EIGRP protocol and obtain neighbors count via SNMP");
     printf("%s\n", "");
@@ -150,10 +109,9 @@ void usage(char * error)
 }
 
 
-/*Print the version of plugin*/
 void version()
 {
-    printf("%s\n", "check_eigrp (Nagios Plugin) %s", VERSION);
+    printf("check_eigrp (Nagios Plugin) %s\n", CHECK_EIGRP_VERSION);
     printf("%s\n", "Copyright (C) 2014 Tiunov Igor");
     printf("%s\n", "");    
     printf("%s\n", "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.");
@@ -167,17 +125,6 @@ void version()
 void stderr_to_stdout()
 {
     dup2(1, 2);
-}
-
-
-void * snmpopen(struct snmp_session session)
-{
-    struct snmp_session session * session_p;
-
-    session_p = snmp_open(&session);
-
-
-    return session_p;
 }
 
 
@@ -258,35 +205,65 @@ void print_interface_description(void* session, char * asnumber, int count, int 
 }
 
 
-void alarm_handler()
+void alarm_handler(int a)
 {
+    /* stop -Wextra warnings */
+    if (a == SIGALRM) {
+        printf("%s\n", "UNKNOWN: Plugin timeout exceeded");
+    }
+
     snmp_close_sessions();
-    printf("%s\n", "UNKNOWN: Plugin timeout exceeded");
     exit(UNKNOWN);
 }
 
 
-int main(int argc, char *argv[])
+void set_timeout_alarm(int timeout, int neighbors)
 {
-    struct snmp_session   session     = { 0 };
-    struct snmp_session * session_ptr = NULL;
+    struct sigaction sa_alarm = { 0 };
+    sa_alarm.sa_handler = alarm_handler;
+    sigaction(SIGALRM, &sa_alarm, 0);
+    alarm((timeout * neighbors) + 1);
+}
 
-    int    verbosity = 0;
-    int    timeout   = 3;
-    char * asnumber  = NULL;
-    char * neighbors = NULL;
+
+void parse_arguments(int argc, char *argv[], struct snmp_session * session, int * verbosity, int * timeout, char * asnumber, char * neighbors)
+{
+    const char * options_string = "H:C:n:s:t:vhVp:c:L:a:x:U:A:X:";
+    int long_index              = 0;
+    int protocol                = 0;
+    int errors                  = 0;
+
+    const struct option long_options[] = {
+        { "hostname",   required_argument, NULL, 'H' },
+        { "community",  required_argument, NULL, 'C' },
+        { "neighbors",  required_argument, NULL, 'n' },
+        { "asnumber",   required_argument, NULL, 's' },
+        { "timeout",    required_argument, NULL, 't' },
+        { "verbose",    no_argument,       NULL, 'v' },
+        { "help",       no_argument,       NULL, 'h' },
+        { "version",    no_argument,       NULL, 'V' },
+        { "protocol",   required_argument, NULL, 'p' },
+        { "context",    required_argument, NULL, 'c' },
+        { "seclevel",   required_argument, NULL, 'L' },
+        { "authproto",  required_argument, NULL, 'a' },
+        { "privproto",  required_argument, NULL, 'x' },
+        { "secname",    required_argument, NULL, 'U' },
+        { "authpasswd", required_argument, NULL, 'A' },
+        { "privpasswd", required_argument, NULL, 'X' },
+        { NULL,         no_argument,       NULL,  0  }
+    };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, optString, longOpts, &longIndex)) != -1) {
+    while ((opt = getopt_long(argc, argv, options_string, long_options, &long_index)) != -1) {
         switch (opt) {
 
         case 'H':
-            session.peername = optarg;
+            session->peername = optarg;
             break;
 
         case 'C':
-            session.community = (unsigned char *) optarg;
-            session.community_len = strlen(optarg);
+            session->community = (unsigned char *) optarg;
+            session->community_len = strlen(optarg);
             break;
 
         case 'n':
@@ -298,93 +275,96 @@ int main(int argc, char *argv[])
             break;
 
         case 't':
-            timeout = atoi(optarg);
-            if (timeout < 3) {
-                timeout = 3;
+            (* timeout) = atoi(optarg);
+            if ((* timeout) < 3) {
+                (* timeout) = 3;
             }
-            else if (timeout > 60) {
-                timeout = 60;
+            else if ((* timeout) > 60) {
+                (* timeout) = 60;
             }
             break;
 
         case 'p':
-            int protocol = atoi(optarg);
+            protocol = atoi(optarg);
             if (protocol == 3) {
-                session.version = SNMP_VERSION_3;
+                session->version = SNMP_VERSION_3;
             }
             else if (protocol == 2) {
-                session.version = SNMP_VERSION_2c;
+                session->version = SNMP_VERSION_2c;
             }
             else if (protocol == 1) {
-                session.version = SNMP_VERSION_1;
+                session->version = SNMP_VERSION_1;
             }
             break;
 
         case 'c':
-            session.contextName = optarg;
-            session.contextNameLen = strlen(optarg);
+            session->contextName = optarg;
+            session->contextNameLen = strlen(optarg);
             break;
 
         case 'L':
             if (!strcasecmp("noAuthNoPriv", optarg)) {
-                session.securityLevel = SNMP_SEC_LEVEL_NOAUTH;
+                session->securityLevel = SNMP_SEC_LEVEL_NOAUTH;
             }
             else if (!strcasecmp("AuthNoPriv", optarg)) {
-                session.securityLevel = SNMP_SEC_LEVEL_AUTHNOPRIV;
+                session->securityLevel = SNMP_SEC_LEVEL_AUTHNOPRIV;
             }
             else if (!strcasecmp("AuthPriv", optarg)) {
-                session.securityLevel = SNMP_SEC_LEVEL_AUTHPRIV;
+                session->securityLevel = SNMP_SEC_LEVEL_AUTHPRIV;
             }
             else {
-                /* error */
+                errors++;
+                printf("%s\n", "Invalid seclevel specified!");
             }
             break;
 
         case 'a':
             if (!strcasecmp("sha", optarg)) {
-                session.securityAuthProto = usmHMACSHA1AuthProtocol;
-                session.securityAuthProtoLen = USM_AUTH_PROTO_SHA_LEN;
+                session->securityAuthProto = usmHMACSHA1AuthProtocol;
+                session->securityAuthProtoLen = USM_AUTH_PROTO_SHA_LEN;
             }
             else if (!strcasecmp("md5", optarg)) {
-                session.securityAuthProto = usmHMACMD5AuthProtocol;
-                session.securityAuthProtoLen = USM_AUTH_PROTO_MD5_LEN;
+                session->securityAuthProto = usmHMACMD5AuthProtocol;
+                session->securityAuthProtoLen = USM_AUTH_PROTO_MD5_LEN;
             }
             else {
-                /* error */
+                errors++;
+                printf("%s\n", "Invalid auth protocol specified!");
             }
             break;
 
         case 'x':
             if (!strcasecmp("aes", optarg)) {
-                session.securityPrivProto = usmAESPrivProtocol;
-                session.securityPrivProtoLen = USM_PRIV_PROTO_AES_LEN;
+                session->securityPrivProto = usmAESPrivProtocol;
+                session->securityPrivProtoLen = USM_PRIV_PROTO_AES_LEN;
             }
             else if (!strcasecmp("des", optarg)) {
-                session.securityPrivProto = usmDESPrivProtocol;
-                session.securityPrivProtoLen = USM_PRIV_PROTO_DES_LEN;
+                session->securityPrivProto = usmDESPrivProtocol;
+                session->securityPrivProtoLen = USM_PRIV_PROTO_DES_LEN;
             }
             else {
-                /* error */
+                errors++;
+                printf("%s\n", "Invalid priv protocol specified!");
             }
             break;
 
         case 'U':
-            session.securityName = optarg;
-            session.securityNameLen = strlen(optarg);
+            session->securityName = optarg;
+            session->securityNameLen = strlen(optarg);
             break;
 
         case 'A':
-            session.securityAuthKey = (unsigned char *) optarg;
-            session.securityAuthKeyLen = strlen(optarg);
+            strcpy((char * ) session->securityAuthKey, (const char *) optarg);
+            session->securityAuthKeyLen = strlen(optarg);
             break;
 
         case 'X':
-            session.securityPrivKey = (unsigned char *) optarg;
-            session.securityPrivKeyLen = strlen(optarg);
+            strcpy((char * ) session->securityPrivKey, (const char *) optarg);
+            session->securityPrivKeyLen = strlen(optarg);
             break;
 
         case 'v':
-            verbosity++;
+            (* verbosity)++;
             break;
 
         case 'V':
@@ -394,108 +374,107 @@ int main(int argc, char *argv[])
 
         case 'h':
         default:
+            version();
             usage(NULL);
             exit(UNKNOWN);
             break;
         }
     }
 
-    /* handle errors */
-    {
-        int errors = 0;
-
-        if (session.peername == NULL) {
-            usage("Hostname (-H flag) must be set!");
-            errors++;
-        }
-
-        if (neighbors == NULL) {
-            usage("Neighbors (-n flag) must be set!");
-            errors++;
-        }
-
-        if (asnumber == NULL) {
-            usage("ASNumber (-s flag) must be set!");
-            errors++;
-        }
-
-        if (errors > 0) {
-            exit(UNKNOWN);
-        }
+    if (session->peername == NULL) {
+        printf("%s\n", "Hostname (-H flag) must be set!");
+        errors++;
     }
 
-    {
-        /* signal handler and timeout */
-        struct sigaction sa_alarm = { 0 };
-        alarmAct.sa_handler = alarm_handler;
-        sigaction(SIGALRM, &sa_alarm, 0);
-        alarm(timeout * atoi(neighbors) + 1);
-
-        session.retries = 2;
-        session.timeout = timeout * 1000000 / (session.retries + 1);
+    if (neighbors == NULL) {
+        printf("%s\n", "Neighbors (-n flag) must be set!");
+        errors++;
     }
+
+    if (asnumber == NULL) {
+        printf("%s\n", "ASNumber (-s flag) must be set!");
+        errors++;
+    }
+
+    if (errors > 0) {
+        usage("****************");
+        exit(UNKNOWN);
+    }
+}
+
+
+int main(int argc, char * argv[])
+{
+    struct snmp_session session = { 0 };
+    void * session_ptr          = NULL;
+    int    verbosity            = 0;
+    int    timeout              = 3;
+    char * asnumber             = NULL;
+    char * neighbors            = NULL;
+    char snmp_oid[100]          = { 0 };
+    char peer_count[12]         = { 0 };
+    size_t buffer_size          = sizeof(peer_count);
+
+    parse_arguments(argc, argv, &session, &verbosity, &timeout, asnumber, neighbors);
+
+    set_timeout_alarm(timeout, atoi(neighbors));
+    session.retries = 2;
+    session.timeout = timeout * 1000000 / (session.retries + 1);
 
     if (verbosity > 0) {
         snmp_enable_stderrlog();
     }
 
-    session_p = snmp_open(&session);
+    session_ptr = snmp_open(&session);
 
-    if (session_p == NULL) {
+    if (session_ptr == NULL) {
         stderr_to_stdout();
         snmp_perror("UNKNOWN");
         snmp_log(LOG_ERR, "Some error occured in SNMP session establishment.\n");
         exit(UNKNOWN);
     }
 
-    char snmp_oid[100] = { 0 };
-
-    char peer_count[12] = { 0 };
-    size_t buffer_size = sizeof(peer_count);
-
     strcpy(snmp_oid, OID_EIGRP_NEIGHBOR_COUNT);
     strcat(snmp_oid, asnumber);
 
-    snmpget(session, snmp_oid, peer_count, buffer_size);
+    snmpget(session_ptr, snmp_oid, peer_count, buffer_size);
 
     if (strcmp(peer_count, "0") == 0) {
-        exitcode = CRITICAL;
+        exit_code = CRITICAL;
         printf("CRITICAL: This router has no EIGRP neighbors. |\n");
     }
-    else if (strcmp(peer_count, neighbors) != 0) {
-        exitcode = WARNING;
+    else if (neighbors != NULL && strcmp(peer_count, neighbors) != 0) {
+        exit_code = WARNING;
         printf("WARNING: Current neighbors counts is %s but schould be %s |\n", peer_count, neighbors);
     }
     else {
-        exitcode = OK;
+        exit_code = OK;
         printf("OK: Neighbors count is %s |\n", peer_count);
     }
 
     /* Get the list of current EIGRP peers. */
-    if ((exitcode == WARNING || exitcode == OK) && verbosity > 0) {
+    if ((exit_code == WARNING || exit_code == OK) && verbosity > 0) {
 
-        /* Some integers for counts */
-        int i, peerNum;
-
-        /* Create buffer for SNMP output value (midlBuff). */
-        char midlBuff[100] = { 0 };
-        buffer_size = sizeof(midlBuff);
-
-        /* Buffers and mutex for IOS version check */
-        char * iosver = midlBuff;
+        char * peer_ip = NULL;
+        int i = 0;
+        int peer_num = atoi(peer_count);
+        char middle_buffer[100] = { 0 };
+        char * ios_ver = middle_buffer;
         char buffer[3] = { 0 };
         int mutex = 0;
 
+        buffer_size = sizeof(middle_buffer);
+
         /* Get and check the IOS version for IP address converting */
-        snmpget(session, OID_PROBE_SOFTWARE_REVISION, iosver, buffer_size);
+        snmpget(session_ptr, OID_PROBE_SOFTWARE_REVISION, ios_ver, buffer_size);
 
         /* Get the major version of IOS */
-        strncpy(buffer, iosver + 1, 2);
+        strncpy(buffer, ios_ver + 1, 2);
 
         /* If the major version of IOS is 15 then check minor version */
         if (strcmp(buffer, "15") == 0) {
             memset(buffer, 0, sizeof(buffer));
-            snprintf(buffer, 2, "%c", iosver[4]);
+            snprintf(buffer, 2, "%c", ios_ver[4]);
 
             /* If minor version is 3 or higher then change mutex */
             if (atoi(buffer) >= 3) {
@@ -506,49 +485,52 @@ int main(int argc, char *argv[])
         /* Get IP addresses */
         memset(snmp_oid, 0, sizeof(snmp_oid));
         strcpy(snmp_oid, OID_EIGRP_PEER_ADDRESS);
-        strcat(snmp_oid, globalArgs.AS);
+        strcat(snmp_oid, asnumber);
         strcat(snmp_oid, ".");
-
-        peerNum = atoi(peer_count);
-        char* peerip;
         
-        for (i = 0; i < peerNum; i++) {
-            memset(midlBuff, 0, buffer_size);
-            peerip = midlBuff;
+        for (i = 0; i < peer_num; i++) {
+            memset(middle_buffer, 0, buffer_size);
+            peer_ip = middle_buffer;
 
-            /* Set peer_count to correct oid position */
-            snprintf(snmp_oid + strlen(OID_EIGRP_PEER_ADDRESS) + 1 + strlen(globalArgs.AS), 12, "%d", i);
-            snmpget(session, snmp_oid, peerip, buffer_size);
+            /* stop compilation warnings about asnumber being null - even though it can't be
+               because that check already happened */
+            if (asnumber != NULL) {
+
+                /* set peer_count to correct oid position */
+                snprintf(snmp_oid + strlen(OID_EIGRP_PEER_ADDRESS) + 1 + strlen(asnumber), 12, "%d", i);
+                snmpget(session_ptr, snmp_oid, peer_ip, buffer_size);
+            }
             
-            /* Print the list of current EIGRP peers. */
+            /* print the list of current EIGRP peers. */
             printf("\t%d: ", i + 1);
             if (mutex == 1) {
-                printf("%.*s", strlen(peerip) - 2, peerip + 1);
+                printf("%.*s", (int) strlen(peer_ip) - 2, peer_ip + 1);
             }
             else {
-                int l;
-                while ((peerip = strtok(peerip, "\" ")) != NULL) {
-                    sscanf(peerip, "%x", &l);
+                unsigned int l;
+                while ((peer_ip = strtok(peer_ip, "\" ")) != NULL) {
+                    sscanf(peer_ip, "%x", &l);
                     if (mutex < 3) {
                         printf("%d.", l);
                     }
                     else {
                         printf("%d", l);
                     }
-                    peerip = NULL;
+                    peer_ip = NULL;
                     mutex++;
                 }
                 mutex = 0;
             }
 
             /* Print the interface name */
-            print_interface_description(session, asnumber, i, mutex);
+            print_interface_description(session_ptr, asnumber, i, mutex);
             printf("%s\n", "");
         }
     }
-    if (session) {
-        snmp_close(session);
+
+    if (session_ptr) {
+        snmp_close(session_ptr);
     }
         
-    return exitcode;
+    return exit_code;
 }
