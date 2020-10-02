@@ -64,7 +64,7 @@ void usage(char * error)
     printf("%s\n", "   specify snmp version to use one of (1|2c|3)");
     printf("%s\n", "   defaults to 2c");
     printf("%s\n", "");
-    printf("%s\n", " -c, --context");
+    printf("%s\n", " -c, --context=STRING");
     printf("%s\n", "   SNMPv3 context");
     printf("%s\n", "");
     printf("%s\n", " -L, --seclevel=STRING");

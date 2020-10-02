@@ -1,0 +1,4 @@
+config.*
+autom4te.cache/
+Makefile
+check_eigrp
